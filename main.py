@@ -119,6 +119,13 @@ class MainWindow(QMainWindow):
         r_layout.addRow(QLabel("Description (supports formatting)"), self.desc_input)
         r_layout.addRow(QLabel("Media Path (optional)"), media_container)
 
+        self.buttons_per_row_input = QSpinBox()
+        self.buttons_per_row_input.setMinimum(1)
+        self.buttons_per_row_input.setMaximum(10)
+        self.buttons_per_row_input.setValue(1)
+        r_layout.addRow(QLabel("Buttons per Row"), self.buttons_per_row_input)
+
+
         apply_btn = QPushButton("Apply Changes")
         apply_btn.clicked.connect(self.apply_box)
         r_layout.addWidget(apply_btn)
@@ -269,8 +276,26 @@ class MainWindow(QMainWindow):
 
     def on_selection(self):
         for box in self.boxes:
-            box.setBrush(QBrush(QColor("#9f9")) if box.isSelected()
-                         else QBrush(QColor("#cde")))
+            if box.isSelected():
+                box.setBrush(QBrush(QColor("#9f9")))
+                self.current_box = box
+                # Populate UI fields
+                self.folder_input.setText(box.folder_name)
+                self.button_input.setText(box.button_name)
+                self.desc_input.setText(box.description)
+                self.media_input.setText(box.media)
+
+                # Read buttons_per_row from info.yaml
+                info_path = box.path / "info.yaml"
+                if info_path.exists():
+                    info = yaml.safe_load(open(info_path))
+                    self.buttons_per_row_input.setValue(info.get("buttons_per_row", 1))
+                else:
+                    self.buttons_per_row_input.setValue(1)
+
+            else:
+                box.setBrush(QBrush(QColor("#cde")))
+
     def browse_media(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select Media", "", "Images/Videos (*.png *.jpg *.mp4)")
         if path:
@@ -325,6 +350,7 @@ class MainWindow(QMainWindow):
         if self.temp_arrow and self.link_origin:
             pos = self.view.mapToScene(self.view.mapFromGlobal(QCursor.pos()))
             self.temp_arrow.setLine(QLineF(self.link_origin.sceneBoundingRect().center(), pos))
+
     def add_box(self):
         folder = f"Box_{uuid.uuid4().hex[:6]}"
         b = RoundedBoxItem(MODULES_PATH / folder, folder, "Description", "", 50, 50, self)
@@ -380,14 +406,37 @@ class MainWindow(QMainWindow):
         def build_keyboard(path=""):
             m = telebot.types.InlineKeyboardMarkup()
             folder = MODULES_PATH / path
-            for child in folder.iterdir():
+
+            # Read this folder's info.yaml to get buttons_per_row if specified
+            info_path = folder / "info.yaml"
+            if info_path.exists():
+                folder_info = yaml.safe_load(open(info_path))
+                per_row = max(1, folder_info.get("buttons_per_row", 1))  # default 1
+            else:
+                per_row = 1
+
+            # Collect all child buttons
+            buttons = []
+            for child in sorted(folder.iterdir()):
                 if child.is_dir():
                     info = yaml.safe_load(open(child / "info.yaml"))
                     lbl, cb = info.get("label", child.name), str(uuid.uuid4())[:8]
-                    m.add(telebot.types.InlineKeyboardButton(lbl, callback_data=cb))
+                    btn = telebot.types.InlineKeyboardButton(lbl, callback_data=cb)
                     callback_map[cb] = str(child.relative_to(MODULES_PATH))
+                    buttons.append(btn)
+
+            # Cap per_row to number of buttons if fewer
+            if len(buttons) < per_row:
+                per_row = len(buttons) if buttons else 1
+
+            # Arrange buttons into rows
+            for i in range(0, len(buttons), per_row):
+                m.row(*buttons[i:i+per_row])
+
+            # Add Back button if not at root
             if path:
                 m.add(telebot.types.InlineKeyboardButton("⬅️ Back", callback_data="BACK"))
+
             return m
 
         @bot.message_handler(commands=["start"])
