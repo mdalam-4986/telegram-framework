@@ -42,15 +42,28 @@ class RoundedBoxItem(QGraphicsRectItem):
         self.path = path
         self.folder_name, self.button_name, self.description, self.media = path.name, label, desc, media
         self.main_win = main
-        self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
-                      QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
+        self.setFlags(
+        QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
+        QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
+        QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges
+)
+
         self.setBrush(QBrush(QColor("#cde")))
+        self.buttons_per_row = 1  # default
         self.text = QGraphicsTextItem(self.format_text(), self)
         self.text.setDefaultTextColor(Qt.GlobalColor.black)
         self.text.setPos(10, 10)
         self.link_handle = LinkHandle(self)
         self.adjust_size()
         self.setPos(x, y)
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange:
+            new_pos = value
+            grid_size = 10  # same as GridScene
+            x = round(new_pos.x() / grid_size) * grid_size
+            y = round(new_pos.y() / grid_size) * grid_size
+            return QPointF(x, y)
+        return super().itemChange(change, value)
 
     def format_text(self):
         parts = [
@@ -80,6 +93,24 @@ class RoundedBoxItem(QGraphicsRectItem):
             f"Description: {self.description}\n"
             f"Media: {self.media or 'None'}"
         )
+class GridScene(QGraphicsScene):
+    def __init__(self, grid_size=10, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.grid_size = grid_size
+
+    def drawBackground(self, painter, rect):
+        left = int(rect.left()) - (int(rect.left()) % self.grid_size)
+        top = int(rect.top()) - (int(rect.top()) % self.grid_size)
+
+        lines = []
+        for x in range(left, int(rect.right()) + self.grid_size, self.grid_size):
+            lines.append(QLineF(x, rect.top(), x, rect.bottom()))
+        for y in range(top, int(rect.bottom()) + self.grid_size, self.grid_size):
+            lines.append(QLineF(rect.left(), y, rect.right(), y))
+
+        painter.setPen(QPen(QColor(230, 230, 230), 0))
+        painter.drawLines(lines)
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -94,7 +125,7 @@ class MainWindow(QMainWindow):
         self.view.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         # Enable cleaner multi-select and panning
-        self.view.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.view.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
         self.view.viewport().installEventFilter(self)
         self._last_mouse_pos = None
 
@@ -353,9 +384,18 @@ class MainWindow(QMainWindow):
 
     def add_box(self):
         folder = f"Box_{uuid.uuid4().hex[:6]}"
-        b = RoundedBoxItem(MODULES_PATH / folder, folder, "Description", "", 50, 50, self)
+
+        # Current center of viewport → scene
+        center_in_scene = self.view.mapToScene(self.view.viewport().rect().center())
+        x, y = center_in_scene.x(), center_in_scene.y()
+
+        b = RoundedBoxItem(MODULES_PATH / folder, folder, "Description", "", x, y, self)
         self.scene.addItem(b)
         self.boxes.append(b)
+
+        # Optional: center view on new box
+        self.view.centerOn(b)
+
 
     def apply_box(self):
         if self.current_box:
@@ -363,7 +403,26 @@ class MainWindow(QMainWindow):
             self.current_box.button_name = self.button_input.text()
             self.current_box.description = self.desc_input.toPlainText()
             self.current_box.media = self.media_input.text()
+            self.current_box.buttons_per_row = self.buttons_per_row_input.value()
             self.current_box.update_text()
+
+            # Persist to YAML
+            info_path = self.current_box.path / "info.yaml"
+            children_paths = [
+                l.end_box.path.relative_to(MODULES_PATH).as_posix()
+                for l in self.links if l.start_box == self.current_box
+            ]
+            pos = self.current_box.scenePos()
+            yaml.safe_dump({
+                "label": self.current_box.button_name,
+                "description": self.current_box.description,
+                "media": self.current_box.media,
+                "children": children_paths,
+                "x": float(pos.x()),
+                "y": float(pos.y()),
+                "buttons_per_row": self.current_box.buttons_per_row
+            }, open(info_path, "w"))
+
 
     def save_all(self):
         if MODULES_PATH.exists():
@@ -493,6 +552,7 @@ class MainWindow(QMainWindow):
             info = yaml.safe_load(open(info_path))
             x, y = info.get("x", 50), info.get("y", 50)
             box = RoundedBoxItem(folder, info.get("label", ""), info.get("description", ""), info.get("media", ""), x, y, self)
+            box.buttons_per_row = info.get("buttons_per_row", 1)
             self.scene.addItem(box)
             self.boxes.append(box)
             rel_path = folder.relative_to(MODULES_PATH).as_posix()
@@ -506,6 +566,11 @@ class MainWindow(QMainWindow):
                     arrow = ArrowItem(parent_box, child_box)
                     self.links.append(arrow)
                     self.scene.addItem(arrow)
+        if self.boxes:
+            bounding_rect = self.scene.itemsBoundingRect()
+            self.scene.setSceneRect(bounding_rect.adjusted(-500, -500, 500, 500))
+            self.view.centerOn(bounding_rect.center())
+
 
 
 if __name__ == "__main__":
