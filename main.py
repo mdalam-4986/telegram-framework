@@ -306,26 +306,54 @@ class MainWindow(QMainWindow):
             self.boxes.append(b)
 
     def on_selection(self):
-        for box in self.boxes:
-            if box.isSelected():
-                box.setBrush(QBrush(QColor("#9f9")))
-                self.current_box = box
-                # Populate UI fields
-                self.folder_input.setText(box.folder_name)
-                self.button_input.setText(box.button_name)
-                self.desc_input.setText(box.description)
-                self.media_input.setText(box.media)
+        selected_boxes = [box for box in self.boxes if box.isSelected()]
 
-                # Read buttons_per_row from info.yaml
-                info_path = box.path / "info.yaml"
-                if info_path.exists():
-                    info = yaml.safe_load(open(info_path))
-                    self.buttons_per_row_input.setValue(info.get("buttons_per_row", 1))
-                else:
-                    self.buttons_per_row_input.setValue(1)
+        if len(selected_boxes) == 1:
+            box = selected_boxes[0]
+            self.current_box = box
+            box.setBrush(QBrush(QColor("#9f9")))
 
+            # Enable UI fields
+            self.folder_input.setEnabled(True)
+            self.button_input.setEnabled(True)
+            self.desc_input.setEnabled(True)
+            self.media_input.setEnabled(True)
+            self.buttons_per_row_input.setEnabled(True)
+
+            # Populate fields
+            self.folder_input.setText(box.folder_name)
+            self.button_input.setText(box.button_name)
+            self.desc_input.setText(box.description)
+            self.media_input.setText(box.media)
+
+            # Read buttons_per_row from parent folder
+            info_path = box.path.parent / "info.yaml"
+            if info_path.exists():
+                info = yaml.safe_load(open(info_path)) or {}
+                self.buttons_per_row_input.setValue(info.get("buttons_per_row", 1))
             else:
+                self.buttons_per_row_input.setValue(1)
+
+        else:
+            self.current_box = None
+            # Gray out UI fields when multi-selected or none
+            self.folder_input.clear()
+            self.button_input.clear()
+            self.desc_input.clear()
+            self.media_input.clear()
+            self.buttons_per_row_input.setValue(1)
+
+            self.folder_input.setEnabled(False)
+            self.button_input.setEnabled(False)
+            self.desc_input.setEnabled(False)
+            self.media_input.setEnabled(False)
+            self.buttons_per_row_input.setEnabled(False)
+
+        # Reset brushes
+        for box in self.boxes:
+            if not box.isSelected():
                 box.setBrush(QBrush(QColor("#cde")))
+
 
     def browse_media(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select Media", "", "Images/Videos (*.png *.jpg *.mp4)")
@@ -399,15 +427,29 @@ class MainWindow(QMainWindow):
 
     def apply_box(self):
         if self.current_box:
+            # Update current box properties
             self.current_box.folder_name = self.folder_input.text()
             self.current_box.button_name = self.button_input.text()
             self.current_box.description = self.desc_input.toPlainText()
             self.current_box.media = self.media_input.text()
-            self.current_box.buttons_per_row = self.buttons_per_row_input.value()
             self.current_box.update_text()
 
-            # Persist to YAML
-            info_path = self.current_box.path / "info.yaml"
+            # Save buttons_per_row in parent folder's info.yaml
+            parent_path = self.current_box.path.parent
+            parent_info_path = parent_path / "info.yaml"
+
+            # If parent info.yaml exists, merge with old data
+            if parent_info_path.exists():
+                parent_info = yaml.safe_load(open(parent_info_path)) or {}
+            else:
+                parent_info = {}
+
+            parent_info["buttons_per_row"] = self.buttons_per_row_input.value()
+
+            yaml.safe_dump(parent_info, open(parent_info_path, "w"))
+
+            # Save current box’s own info.yaml
+            box_info_path = self.current_box.path / "info.yaml"
             children_paths = [
                 l.end_box.path.relative_to(MODULES_PATH).as_posix()
                 for l in self.links if l.start_box == self.current_box
@@ -419,9 +461,9 @@ class MainWindow(QMainWindow):
                 "media": self.current_box.media,
                 "children": children_paths,
                 "x": float(pos.x()),
-                "y": float(pos.y()),
-                "buttons_per_row": self.current_box.buttons_per_row
-            }, open(info_path, "w"))
+                "y": float(pos.y())
+            }, open(box_info_path, "w"))
+
 
 
     def save_all(self):
