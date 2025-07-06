@@ -75,13 +75,14 @@ class RoundedBoxItem(QGraphicsRectItem):
         return "\n".join(parts)
 
     def adjust_size(self):
-        self.text.setPlainText(self.format_text())
+        text = self.format_text()
         doc = QTextDocument()
-        doc.setPlainText(self.format_text())
-        width = 200
-        self.text.setTextWidth(width - 20)
+        doc.setPlainText(text)
+        doc.setTextWidth(200 - 20)  # allow wrapping inside 200px width
         height = doc.size().height() + 30
-        self.setRect(0, 0, width, height)
+        self.setRect(0, 0, 200, height)
+        self.text.setPlainText(text)
+        self.text.setTextWidth(200 - 20)
         self.link_handle.setPos(self.rect().bottomRight() - QPointF(10, 10))
 
     def update_text(self):
@@ -114,12 +115,12 @@ class GridScene(QGraphicsScene):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Telegram Bot Framework")
+        self.setWindowTitle("Telegram Bot Framework | Created by mdalam-4986 on GitHub")
         self.resize(1400, 800)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self.bot_token = self.load_bot_token()
-        self.main_text = "🚀 Welcome! Use the formatting syntax:\n*bold* _italic_ ~strike~ `mono` >quote ||spoiler||"
+        self.main_text = "🚀 Welcome!"
         self.scene, self.boxes, self.links = QGraphicsScene(), [], []
         self.view = QGraphicsView(self.scene)
         self.view.setRenderHint(QPainter.RenderHint.Antialiasing)
