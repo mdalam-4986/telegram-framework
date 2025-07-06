@@ -109,6 +109,7 @@ You can keep editing with `main.py` to update `root-menu/` and restart the deplo
 - `config.py` – Stores API key.
 - `root-menu/` – Your menu definitions.
 - `requirements.txt` – Python dependencies.
+  
 Ensure that when deploying onto a server, the root-menu folder with its contents and deploy_bot.py are in the same directory; with deploy_bot.py being the file to always be ran by the server.
 ---
 
