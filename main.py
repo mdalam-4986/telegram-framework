@@ -42,7 +42,8 @@ class RoundedBoxItem(QGraphicsRectItem):
         self.path = path
         self.folder_name, self.button_name, self.description, self.media = path.name, label, desc, media
         self.main_win = main
-        self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsMovable | QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
+        self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
+                      QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         self.setBrush(QBrush(QColor("#cde")))
         self.text = QGraphicsTextItem(self.format_text(), self)
         self.text.setDefaultTextColor(Qt.GlobalColor.black)
@@ -79,20 +80,26 @@ class RoundedBoxItem(QGraphicsRectItem):
             f"Description: {self.description}\n"
             f"Media: {self.media or 'None'}"
         )
-
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Telegram Bot Framework")
         self.resize(1400, 800)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self.bot_token = self.load_bot_token()
         self.main_text = "🚀 Welcome! Use the formatting syntax:\n*bold* _italic_ ~strike~ `mono` >quote ||spoiler||"
         self.scene, self.boxes, self.links = QGraphicsScene(), [], []
         self.view = QGraphicsView(self.scene)
         self.view.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self.view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+
+        # Enable cleaner multi-select and panning
+        self.view.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.view.viewport().installEventFilter(self)
+        self._last_mouse_pos = None
+
+        self.undo_stack, self.redo_stack = [], []
+        self.copied_boxes_data = []
 
         self.right_panel = QWidget()
         r_layout = QFormLayout()
@@ -113,7 +120,6 @@ class MainWindow(QMainWindow):
         r_layout.addRow(QLabel("Media Path (optional)"), media_container)
 
         apply_btn = QPushButton("Apply Changes")
-        apply_btn.setToolTip("Save changes made to selected box.")
         apply_btn.clicked.connect(self.apply_box)
         r_layout.addWidget(apply_btn)
 
@@ -134,7 +140,9 @@ class MainWindow(QMainWindow):
             ("+ Add Box", self.add_box),
             ("💾 Save", self.save_all),
             ("🔑 API Key", self.set_bot_token),
-            ("📝 Edit Main Menu", self.edit_main_menu)
+            ("📝 Edit Main Menu", self.edit_main_menu),
+            ("↩️ Undo", self.undo),
+            ("↪️ Redo", self.redo)
         ]:
             btn = QPushButton(text)
             btn.clicked.connect(handler)
@@ -149,10 +157,124 @@ class MainWindow(QMainWindow):
         self.timer.start(30)
 
         self.load_existing()
+    def eventFilter(self, obj, event):
+        if obj is self.view.viewport():
+            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.MiddleButton:
+                self._last_mouse_pos = event.pos()
+                self.view.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+                event.accept()
+                return True
+            elif event.type() == QEvent.Type.MouseMove and self._last_mouse_pos:
+                delta = event.pos() - self._last_mouse_pos
+                self.view.horizontalScrollBar().setValue(self.view.horizontalScrollBar().value() - delta.x())
+                self.view.verticalScrollBar().setValue(self.view.verticalScrollBar().value() - delta.y())
+                self._last_mouse_pos = event.pos()
+                event.accept()
+                return True
+            elif event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.MiddleButton:
+                self._last_mouse_pos = None
+                self.view.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+                event.accept()
+                return True
+        return super().eventFilter(obj, event)
 
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Delete:
+            selected_boxes = [item for item in self.scene.selectedItems() if isinstance(item, RoundedBoxItem)]
+            if selected_boxes:
+                confirm = QMessageBox.question(self, "Confirm Deletion", f"Delete {len(selected_boxes)} selected box(es)?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if confirm == QMessageBox.StandardButton.Yes:
+                    self.save_undo()
+                    for box in selected_boxes:
+                        self.delete_box(box)
+        elif event.matches(QKeySequence.StandardKey.Copy):
+            self.copy_selected()
+        elif event.matches(QKeySequence.StandardKey.Paste):
+            self.paste_copied()
+        super().keyPressEvent(event)
+
+    def delete_box(self, box):
+        to_remove = []
+        for link in self.links:
+            if link.start_box == box or link.end_box == box:
+                self.scene.removeItem(link)
+                to_remove.append(link)
+        for link in to_remove:
+            self.links.remove(link)
+        self.scene.removeItem(box)
+        if box in self.boxes:
+            self.boxes.remove(box)
+
+    def undo(self):
+        if not self.undo_stack: return
+        state = self.undo_stack.pop()
+        self.redo_stack.append(self.capture_state())
+        self.restore_state(state)
+
+    def redo(self):
+        if not self.redo_stack: return
+        state = self.redo_stack.pop()
+        self.undo_stack.append(self.capture_state())
+        self.restore_state(state)
+
+    def save_undo(self):
+        self.undo_stack.append(self.capture_state())
+        self.redo_stack.clear()
+    def capture_state(self):
+        boxes_data, links_data = [], []
+        for b in self.boxes:
+            boxes_data.append((
+                b.folder_name, b.button_name, b.description, b.media,
+                b.scenePos().x(), b.scenePos().y()
+            ))
+        for l in self.links:
+            links_data.append((
+                self.boxes.index(l.start_box),
+                self.boxes.index(l.end_box)
+            ))
+        return (boxes_data, links_data)
+
+    def restore_state(self, state):
+        boxes_data, links_data = state
+        for item in self.boxes + self.links:
+            self.scene.removeItem(item)
+        self.boxes.clear()
+        self.links.clear()
+        for folder, label, desc, media, x, y in boxes_data:
+            b = RoundedBoxItem(MODULES_PATH / folder, label, desc, media, x, y, self)
+            self.scene.addItem(b)
+            self.boxes.append(b)
+        for start_idx, end_idx in links_data:
+            a = ArrowItem(self.boxes[start_idx], self.boxes[end_idx])
+            self.scene.addItem(a)
+            self.links.append(a)
+
+    def copy_selected(self):
+        self.copied_boxes_data = [
+            (b.folder_name, b.button_name, b.description, b.media,
+             b.scenePos().x(), b.scenePos().y())
+            for b in self.scene.selectedItems() if isinstance(b, RoundedBoxItem)
+        ]
+
+    def paste_copied(self):
+        if not self.copied_boxes_data:
+            return
+        self.save_undo()
+        for data in self.copied_boxes_data:
+            folder = f"Box_{uuid.uuid4().hex[:6]}"
+            label, desc, media, x, y = data[1], data[2], data[3], data[4]+20, data[5]+20
+            b = RoundedBoxItem(MODULES_PATH / folder, label, desc, media, x, y, self)
+            self.scene.addItem(b)
+            self.boxes.append(b)
+
+    def on_selection(self):
+        for box in self.boxes:
+            box.setBrush(QBrush(QColor("#9f9")) if box.isSelected()
+                         else QBrush(QColor("#cde")))
     def browse_media(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select Media", "", "Images/Videos (*.png *.jpg *.mp4)")
-        if path: self.media_input.setText(path)
+        if path:
+            self.media_input.setText(path)
 
     def show_help(self):
         QMessageBox.information(self, "Help",
@@ -160,37 +282,20 @@ class MainWindow(QMainWindow):
             "🖋 Adding Boxes:\n"
             "- Click '+ Add Box' to create a new menu node.\n"
             "- Drag the blue dot to another box to create a link.\n"
-            "- Move boxes around freely.\n\n"
+            "- Use Shift/Ctrl to multi-select and Delete to remove.\n"
+            "- Use Ctrl+C / Ctrl+V to copy/paste.\n\n"
             "✏️ Editing Boxes:\n"
             "- Select a box by clicking it.\n"
             "- Edit its folder name (internal), button label, description, and media.\n"
             "- Folder name uniquely identifies this box and is used internally. Change carefully.\n"
-            "- Description can use Markdown: *bold*, _italic_, ~strike~, `mono`, >quote, ||spoiler||.\n"
-            "- Media path (optional) sends an image/video with the text.\n\n"
+            "- Description supports Markdown formatting.\n\n"
             "💾 Saving & Loading:\n"
-            "- Always save using '💾 Save' before exiting. All positions, links, and data are saved.\n"
-            "- On restart, the framework loads all saved data automatically.\n\n"
+            "- Always save using '💾 Save' before exiting.\n"
+            "- On restart, the framework loads saved data.\n\n"
             "🚀 Starting the Bot:\n"
-            "- Set your Telegram bot API key using '🔑 API Key' if not set yet.\n"
+            "- Set your Telegram bot API key using '🔑 API Key'.\n"
             "- Click '▶️ Start Bot' to begin polling.\n"
-            "- The bot uses your boxes and links to build menus and respond to clicks.\n\n"
-            "📄 Other Notes:\n"
-            "- Main Menu text can be customized with '📝 Edit Main Menu'.\n"
-            "- Blue link handle shows a tooltip.\n"
-            "- Hover over all inputs/buttons for quick tooltips.\n"
-            "- Always keep folder names unique.\n"
         )
-
-
-    def on_selection(self):
-        items = self.scene.selectedItems()
-        if items and isinstance(items[0], RoundedBoxItem):
-            b = items[0]
-            self.current_box = b
-            self.folder_input.setText(b.folder_name)
-            self.button_input.setText(b.button_name)
-            self.desc_input.setText(b.description)
-            self.media_input.setText(b.media)
 
     def start_link(self, origin_box):
         self.link_origin = origin_box
@@ -211,7 +316,7 @@ class MainWindow(QMainWindow):
                 self.scene.addItem(arrow)
             self.scene.removeItem(self.temp_arrow)
             self.temp_arrow, self.link_origin = None, None
-            self.view.viewport().unsetCursor()
+            self.view.viewport().setCursor(Qt.CursorShape.ArrowCursor)
         QGraphicsScene.mouseReleaseEvent(self.scene, event)
 
     def update_arrows(self):
@@ -220,7 +325,6 @@ class MainWindow(QMainWindow):
         if self.temp_arrow and self.link_origin:
             pos = self.view.mapToScene(self.view.mapFromGlobal(QCursor.pos()))
             self.temp_arrow.setLine(QLineF(self.link_origin.sceneBoundingRect().center(), pos))
-
     def add_box(self):
         folder = f"Box_{uuid.uuid4().hex[:6]}"
         b = RoundedBoxItem(MODULES_PATH / folder, folder, "Description", "", 50, 50, self)
@@ -243,7 +347,8 @@ class MainWindow(QMainWindow):
         def save_box(box, path):
             b_path = path / box.folder_name
             b_path.mkdir()
-            children_paths = [l.end_box.path.relative_to(MODULES_PATH).as_posix() for l in self.links if l.start_box == box]
+            children_paths = [l.end_box.path.relative_to(MODULES_PATH).as_posix()
+                              for l in self.links if l.start_box == box]
             pos = box.scenePos()
             yaml.safe_dump({
                 "label": box.button_name,
@@ -292,9 +397,7 @@ class MainWindow(QMainWindow):
         @bot.callback_query_handler(func=lambda c: True)
         def cb(call):
             path = callback_map.get(call.data, "")
-            folder = None
-            desc, media = "", None
-
+            folder, desc, media = None, "", None
             if call.data == "BACK":
                 path = ""
                 desc = self.main_text
@@ -305,23 +408,21 @@ class MainWindow(QMainWindow):
                     desc, media = info.get("description", ""), info.get("media", "")
                 if not desc.strip():
                     desc = self.main_text
-
             try:
                 bot.delete_message(call.message.chat.id, call.message.message_id)
             except:
                 pass
-
             if media and Path(media).exists():
                 with open(media, "rb") as f:
                     bot.send_photo(call.message.chat.id, f, caption=desc, reply_markup=build_keyboard(path))
             else:
                 bot.send_message(call.message.chat.id, desc, reply_markup=build_keyboard(path))
-
         bot.infinity_polling()
 
     def edit_main_menu(self):
         text, ok = QInputDialog.getText(self, "Main Menu Text", "Enter main menu text:", text=self.main_text)
-        if ok: self.main_text = text
+        if ok:
+            self.main_text = text
 
     def set_bot_token(self):
         token, ok = QInputDialog.getText(self, "API Key", "Enter Bot API key:", QLineEdit.EchoMode.Password)
